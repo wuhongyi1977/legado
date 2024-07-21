@@ -7,6 +7,7 @@ import io.legado.app.R
 import io.legado.app.constant.AppConst
 import io.legado.app.constant.AppLog
 import io.legado.app.constant.AppPattern
+import io.legado.app.constant.PreferKey
 import io.legado.app.exception.NoStackTraceException
 import io.legado.app.help.MediaHelp
 import io.legado.app.help.config.AppConfig
@@ -17,6 +18,7 @@ import io.legado.app.model.ReadBook
 import io.legado.app.utils.GSON
 import io.legado.app.utils.LogUtils
 import io.legado.app.utils.fromJsonObject
+import io.legado.app.utils.getPrefBoolean
 import io.legado.app.utils.servicePendingIntent
 import io.legado.app.utils.toastOnUi
 import kotlinx.coroutines.ensureActive
@@ -76,6 +78,50 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener 
             toastOnUi(R.string.tts_init_failed)
         }
     }
+    fun splitAndReform(lines: List<String>, maxLen:Int): Map<Int,String> {
+        val c = lines.size
+        AppLog.put("splitAndReform lines.size:$c")
+        val result = mutableMapOf<Int,String>()
+        var currentString = StringBuilder()
+        var i = 0
+
+        for (line in lines) {
+            if (currentString.length + line.length + 1 > maxLen) {
+                result.put(i, currentString.toString())
+                AppLog.put("splitAndReform put:$i")
+                currentString = StringBuilder()
+            }
+            if (currentString.isNotEmpty()) {
+                currentString.append("\n")
+            }
+            currentString.append(line)
+            i++
+        }
+
+        if (currentString.isNotEmpty()) {
+            AppLog.put("splitAndReform put:$i-1")
+            result.put(i-1, currentString.toString())
+        }
+
+        return result
+    }
+    fun getStringByIndex(map: Map<Int, String>, index: Int): Int? {
+        // 获取所有键并排序
+        val sortedKeys = map.keys.sorted()
+        // 初始化要返回的键
+        var resultKey: Int? = null
+
+        // 迭代排序后的键，找到小于或等于给定索引的最大键
+        for (key in sortedKeys) {
+            if (key > index) {
+                resultKey = key
+                break
+            }
+        }
+
+        // 返回找到的键对应的值
+        return resultKey
+    }
 
     @Synchronized
     override fun play() {
@@ -86,6 +132,10 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener 
             ReadBook.readAloud()
             return
         }
+        val textLen = 1000
+        val readAloudByPage = getPrefBoolean(PreferKey.readAloudByPage)
+        val bookname = ReadBook.book?.name?:""
+        val bookauthor = ReadBook.book?.author?:""
         super.play()
         MediaHelp.playSilentSound(this@TTSReadAloudService)
         speakJob?.cancel()
@@ -105,7 +155,10 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener 
                 initTts()
                 return@execute
             }
+            val curtitle = ReadBook.curTextChapter?.title?:""
+            val bookstr = "__jer&%*ry__" + bookname + "___"+ bookauthor + "___"+ curtitle
             val contentList = contentList
+            val map = splitAndReform(contentList, textLen)
             for (i in nowSpeak until contentList.size) {
                 ensureActive()
                 var text = contentList[i]
@@ -115,8 +168,31 @@ class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener 
                 if (text.matches(AppPattern.notReadAloudRegex)) {
                     continue
                 }
+                val mergeStrIndx = getStringByIndex(map, i)
+                var mergeStr = ""
+                if (mergeStrIndx != null){
+                    mergeStr = "__jer&%*ry__" + map[mergeStrIndx]
+                    if(mergeStrIndx == i + 5){
+                        val mergeStrIndx2 = getStringByIndex(map, mergeStrIndx)
+                        if (mergeStrIndx2 != null) {
+                            val tempStr = map[mergeStrIndx2]
+                            mergeStr = mergeStr + "__jer&%*ry__" + tempStr
+                        }
+                        else{
+                            val nextText = ReadBook.nextTextChapter?.getNeedReadAloud(0, readAloudByPage, 0)
+                            val nextTitle = ReadBook.nextTextChapter?.title
+                            val nextList = (nextText?:"").split("\n")
+                                .filter { it.isNotEmpty() }
+                            val nextMap = splitAndReform(nextList, textLen)
+                            val nextIndex = getStringByIndex(nextMap, 0)
+                            val tempStr = nextMap[nextIndex]?:""
+                            mergeStr = mergeStr + "__jer&%*ry__" + tempStr+ "___"+ nextTitle
+                        }
+                    }
+                }
+
                 result = tts.runCatching {
-                    speak(text, TextToSpeech.QUEUE_ADD, null, AppConst.APP_TAG + i)
+                    speak(text + bookstr + mergeStr, TextToSpeech.QUEUE_ADD, null, AppConst.APP_TAG + i)
                 }.getOrElse {
                     AppLog.put("tts出错\n${it.localizedMessage}", it, true)
                     TextToSpeech.ERROR
